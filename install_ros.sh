@@ -48,7 +48,6 @@ catkin config \
         --init \
         -DCMAKE_BUILD_TYPE=Release \
         -DROS_PYTHON_VERSION=3 \
-        -DPYTHON_EXECUTABLE=python3 \
         --blacklist rqt_rviz rviz_plugin_tutorials librviz_tutorial --install
 
 rosinstall_generator desktop_full --rosdistro melodic --deps --tar > \

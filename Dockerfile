@@ -20,4 +20,5 @@ WORKDIR /opt/psegs-ros-ext
 
 RUN ./install_ros.sh
 
+RUN pip3 install pytest
 RUN source /opt/ros/melodic/install/setup.bash

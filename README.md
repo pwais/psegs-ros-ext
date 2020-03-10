@@ -91,6 +91,11 @@ docker build -t psegs/ext-ros-test:v1 .
 docker run --rm -it -v `pwd`:/opt/psegs-ros-ext psegs/ext-ros-test:v1 bash -c 'pytest -s -vvv test_rospy.py'
 ```
 
+Tag and push:
+```
+docker tag psegs/ext-ros-test:v1 psegs/ext-ros-test
+docker push psegs/ext-ros-test
+```
 
 
 ```

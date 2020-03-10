@@ -1,0 +1,9 @@
+version: 2
+jobs:
+  build:
+    machine: true
+    steps:
+      - checkout
+      - run:
+          name: "Run tests"
+          command: docker run --rm -it psegs/ext-ros-test bash -c 'pytest test_rospy.py'
