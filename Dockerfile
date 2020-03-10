@@ -20,3 +20,4 @@ WORKDIR /opt/psegs-ros-ext
 
 RUN ./install_ros.sh
 
+RUN source /opt/ros/melodic/install/setup.bash

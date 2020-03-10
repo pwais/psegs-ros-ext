@@ -45,16 +45,50 @@ mycomputer $ docker run --net=host -it psegs/ext-ros-test bash
 
 ```shell
 indocker $ wget https://open-source-webviz-ui.s3.amazonaws.com/demo.bag
- 
+demo.bag 100%[==========================>] 166.51M  7.44MB/s  in 97s
+
+# Use our ROS Install
+indocker $ source /opt/ros/melodic/install/setup.bash
+
+# If you have multiple NICs on your machine, set HOSTNAME
+indocker $ HOSTNAME=10.0.0.8 roslaunch rosbridge_server rosbridge_websocket.launch &
+(ros should start up)
+
+indocker $ rosbag play --pause demo.bag
+(hit spacebar to play / pause)
 ```
 
+For more info about configuring the `rosbridge` server, see 
+[the rosbridge tutorial](http://wiki.ros.org/rosbridge_suite/Tutorials/RunningRosbridge).
+
+
+### Connect Webviz to Your Server
+
+First, if you're using Chrome, you may need to enable 'insecure content'.
+In Chrome v80 Mac, you can try going to 
+[chrome://settings/content/insecureContent?search=insecure+content](chrome://settings/content/insecureContent?search=insecure+content).  You may need to look up the process
+for your own browser, because even in Chrome they move the setting from time
+to time.
+
+Next, just launch Webviz, pointing it at your server.  If your server
+address is `10.0.0.8`, use:
+[https://webviz.io/app/?rosbridge-websocket-url=ws://10.0.0.8:9090](https://webviz.io/app/?rosbridge-websocket-url=ws://10.0.0.8:9090)
+
+
+As you play / pause the bag started in the Server terminal session, you should
+see the same playback (though perhaps a little slower) than you would when
+you view the standard Webviz embedded demo at [https://webviz.io/app/?demo](https://webviz.io/app/?demo).
+
+(Note: you might see some errors about the `radar_driver` package).
+
+FMI see the [official Webviz docs](https://github.com/cruise-automation/webviz/blob/e57b3a17f6caafd2d152696c220a6c24888f83e9/packages/webviz-core/src/util/helpModalOpenSource.help.md#loading-data).
 
 ## Development
 
 Build and test:
 ```
 docker build -t psegs/ext-ros-test:v1 .
-docker run --rm -it psegs/ext-ros-test:v1 -v `pwd`:/opt/psegs-ros-ext bash -c 'pytest -s -vvv test_rospy.py'
+docker run --rm -it -v `pwd`:/opt/psegs-ros-ext psegs/ext-ros-test:v1 bash -c 'pytest -s -vvv test_rospy.py'
 ```
 
 

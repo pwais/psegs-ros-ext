@@ -45,8 +45,10 @@ rosdep update
 mkdir melodic
 cd melodic
 catkin config \
-        --init -DCMAKE_BUILD_TYPE=Release \
+        --init \
+        -DCMAKE_BUILD_TYPE=Release \
         -DROS_PYTHON_VERSION=3 \
+        -DPYTHON_EXECUTABLE=python3 \
         --blacklist rqt_rviz rviz_plugin_tutorials librviz_tutorial --install
 
 rosinstall_generator desktop_full --rosdistro melodic --deps --tar > \
@@ -102,7 +104,6 @@ apt-get install -y \
 
 rosdep install --from-paths src --ignore-src -y \
     --skip-keys="`rosdep check --from-paths src --ignore-src | grep python | sed -e "s/^apt\t//g" | sed -z "s/\n/ /g"`"
-find . -type f -exec sed -i 's/\/usr\/bin\/env[ ]*python/\/usr\/bin\/env python3/g' {} +
 
 ##
 ## rosbridge_suite and Friends
@@ -121,6 +122,9 @@ apt-get install -y \
         python3-tornado \
         python3-bson
 
+
+# Ensure our ROS install uses Python 3
+find . -type f -exec sed -i 's/\/usr\/bin\/env[ ]*python/\/usr\/bin\/env python3/g' {} +
 
 ##
 ## BUILD!
