@@ -18,4 +18,6 @@ This repo contains:
 
 ## Usage
 
-yay
+```
+docker build -t psegs/ext-ros-test .
+```
