@@ -11,7 +11,9 @@ RUN \
   apt-get install -y \ 
     git \
     python3 \
-    python3-pip
+    python3-pip \
+    wget \
+    vim
 
 COPY . /opt/psegs-ros-ext
 WORKDIR /opt/psegs-ros-ext
