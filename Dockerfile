@@ -8,7 +8,8 @@ ENV PYTHONDONTWRITEBYTECODE 1
 
 RUN \
   apt-get update && \
-  apt-get install -y \
+  apt-get install -y \ 
+    git \
     python3 \
     python3-pip
 

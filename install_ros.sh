@@ -97,7 +97,8 @@ apt-get install -y \
         python3-mock  \
         python3-opengl  \
         python3-empy  \
-        python3-nose
+        python3-nose \
+        python3-pycryptodome
 
 rosdep install --from-paths src --ignore-src -y \
     --skip-keys="`rosdep check --from-paths src --ignore-src | grep python | sed -e "s/^apt\t//g" | sed -z "s/\n/ /g"`"
