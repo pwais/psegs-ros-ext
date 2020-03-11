@@ -13,3 +13,6 @@ COPY . /opt/psegs-ros-ext
 RUN ln -s /opt/psegs-ros-ext/psegs-ros-util /usr/local/bin/psegs-ros-util
 
 WORKDIR /opt/psegs
+
+ENTRYPOINT ["/opt/psegs-ros-ext/ros_entrypoint.sh"]
+CMD ["bash"]
