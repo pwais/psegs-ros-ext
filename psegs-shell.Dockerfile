@@ -1,4 +1,4 @@
-ARG PSEGS_BASE=psegs/psegs:v0.0.1
+ARG PSEGS_BASE=psegs/psegs:0.0.1
 
 FROM ${PSEGS_BASE} as base
 

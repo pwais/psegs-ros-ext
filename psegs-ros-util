@@ -52,6 +52,7 @@ To start a ROS Node that broadcasts a segment:
 ###############################################################################
 ### Utils
 
+import collections
 import os
 import sys
 
@@ -65,6 +66,16 @@ log.setLevel(logging.INFO)
 console_handler = logging.StreamHandler(sys.stderr)
 console_handler.setFormatter(logging.Formatter(LOG_FORMAT))
 log.addHandler(console_handler)
+
+
+def import_psegs_or_die(path):
+  sys.path.append(path)
+  try:
+    import psegs
+    return psegs
+  except Exception as e:
+    assert False, \
+      "Could not find PSegs root, expected %s; error: %s" % (path, e))
 
 
 ###############################################################################
@@ -290,6 +301,58 @@ def cuboids_to_ros_marker_array(cuboids):
   return marray
 
 
+### PSegs -> ROS: RDD[StampedDatum] conversion ::::::::::::::::::::::::::::::::
+
+# A container compatible with both ROSBag as well as ROS Publishers
+ROSMsgEntry = collections.namedtuple(
+                'ROSMsgEntry', ('topic', 'timestamp', 'msg'))
+
+def iter_rosmsgs_from_datum(stamped_datum):
+  """Given a PSegs `StampedDatum`, generate one or more `ROSMsgEntry`
+  instances"""
+  
+  sd = stamped_datum
+  msg_t = nanostamp_to_rostime(sd.uri.timestamp)
+
+  transforms = []
+  if sd.camera_image:
+    namespace = to_ros_topic(sd.uri.topic)
+    yield ROSMsg(
+      timestamp=msg_t,
+      topic=namespace + '/image',
+      msg=ci_to_ros_image(sd.camera_image))
+    yield ROSMsg(
+      timestamp=msg_t,
+      topic=namespace + '/camera_info',
+      msg=ci_to_ros_camera_info(sd.camera_image))
+
+    transforms += [sd.camera_image.ego_pose, sd.camera_image.ego_to_sensor]
+
+  elif sd.point_cloud:
+    yield ROSMsg(
+      timestamp=msg_t,
+      topic=to_ros_topic(sd.uri.topic),
+      msg=pc_to_ros_pcl(sd.point_cloud))
+    
+    transforms += [sd.point_cloud.ego_pose, sd.point_cloud.ego_to_sensor]
+
+  elif sd.cuboids:
+    yield ROSMsg(
+      timestamp=msg_t,
+      topic=to_ros_topic(sd.uri.topic),
+      msg=cuboids_to_ros_marker_array(sd.cuboids))
+    transforms += [c.ego_pose for c in sd.cuboids]
+
+  elif sd.transform:
+    transforms += [sd.transform]
+  
+  for transform in transforms:
+    yield ROSMsg(
+      timestamp=msg_t,
+      topic='/tf',
+      msg=transform_to_ros(transform))
+
+
 ### Self-Test :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
 
 def _create_fake_black_png(hw=(100, 200)):
@@ -306,8 +369,9 @@ def _create_fake_black_png(hw=(100, 200)):
   return img_bytes
 
 
-def test_psegs_ros():
-  ### Test PSegs -> ROS conversions using PSegs prototypes
+def test_psegs_ros(args):
+  # Test PSegs -> ROS conversions using PSegs prototypes ----------------------
+  import_psegs_or_die(args.psegs_root)
 
   import copy
   from psegs.datum import stamped_datum as sd
@@ -373,7 +437,13 @@ def create_arg_parser():
   parser.add_argument(
     '--segments', default='',
     help='Use these segment_ids (comma-separated list)')
-  
+  parser.add_argument(
+    '--psegs-root', default='/opt/psegs',
+    help='Use this psegs workspace [default %(default)s]')
+  parser.add_argument(
+    '--bag-compression', default='lz4',
+    help='Use this ROS Bag compression scheme [default %(default)s]')
+
   # Actions
   parser.add_argument(
     '--to-bag', default='',
@@ -388,6 +458,19 @@ def create_arg_parser():
   return parser
 
 
+def main(args=None):
+  if not args:
+    parser = create_arg_parser()
+    args = parser.parse_args()
+  
+  if args.to_bag:
+    export_bags(args)
+  elif args.broadcast:
+    run_rosnode(args)
+  elif args.self_test:
+    test_psegs_ros()
+
+
 def get_segment_uris(args):
   segs = args.segments.split(',')
   uris = []
@@ -400,25 +483,97 @@ def get_segment_uris(args):
   return uris
 
 
+### ROS Bag Export ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+
 def export_bags(args):
+  import_psegs_or_die(args.psegs_root)
+  from psegs import datum
+  from psegs.spark import Spark
+  from psegs.table.sd_db import StampedDatumDB
+
+  import rosbag
+
   seg_uris = get_segment_uris(args)
+  log.info("Going to export bags for %s segments ..." % len(seg_uris))
+
+  if len(seg_uris) > 1:
+    from oarphpy import util as oputil
+    oputil.mkdir(args.to_bag)
+    log.info("... saving bags to %s ..." % args.to_bag)
+  
+  with Spark.getOrCreate() as spark:
+    for seg_uri in seg_uris:
+      if len(seg_uris) > 1:
+        bag_name = str(seg_uri)
+        bag_name = bag_name.replace(datum.URI.PREFIX, '') + '.bag'
+        bag_dest = os.path.join(args.to_bag, bag_name)
+      else:
+        bag_dest = args.to_bag
+      log.info("... writing a bag to %s ..." % bag_dest)
+      
+      sd_rdd = StampedDatumDB.get_segment_datum_rdd(
+                  spark, seg_uri, time_ordered=True)
+      log.info("... addressed datums for %s ..." % bag_dest)
+
+      comp = args.bag_compression
+      n_written = 0
+      with rosbag.Bag(bag_dest, mode='w', compression=comp) as bag:
+        for sd in sd_rdd.toLocalIterator():
+          for rosmsg in iter_rosmsgs_from_datum(sd):
+            bag.write(rosmsg.topic, rosmsg.msg, t=rosmsg.timestamp)
+            n_written += 1
+            if (n_written % 1000) == 0:
+              log.info("... wrote %s to %s ...\n\n%s\n\n" % (
+                n_written, bag_dest, str(bag)))
+      log.info("... done writing %s ..." % bag_dest)
+  log.info("... wrote all bags to %s ." % args.to_bag)
+
+
+### Broadcast Using ROS Node ::::::::::::::::::::::::::::::::::::::::::::::::::
+
+class DynamicPubNode(object):
+  def __init__(self):
+    import rospy
+    self._topic_to_pub = {}
+    rospy.init_node('psegs_ros_util_broadcast')
+
+  def publish(self, topic, msg):
+    if topic not in self._topic_to_pub:
+      pub = rospy.Publisher(topic, type(msg), queue_size=0)
+      self._topic_to_pub[topic] = pub
+    pub = self._topic_to_pub[topic]
+    pub.publish(msg)
 
 
 def run_rosnode(args):
-  pass
+  import_psegs_or_die(args.psegs_root)
+  from psegs import datum
+  from psegs.spark import Spark
+  from psegs.table.sd_db import StampedDatumDB
 
+  seg_uris = get_segment_uris(args)
+  log.info("Going to broadcast data for %s segments ..." % len(seg_uris))
 
-def main(args=None):
-  if not args:
-    parser = create_arg_parser()
-    args = parser.parse_args()
+  node = DynamicPubNode()
   
-  if args.to_bag:
-    export_bags(args)
-  elif args.broadcast:
-    run_rosnode(args)
-  elif args.self_test:
-    test_psegs_ros()
+  with Spark.getOrCreate() as spark:
+    for seg_uri in seg_uris:
+      sd_rdd = StampedDatumDB.get_segment_datum_rdd(
+                  spark, seg_uri, time_ordered=True)
+      log.info("... addressed datums for %s ..." % seg_uri)
+
+      n = 0
+      for sd in sd_rdd.toLocalIterator():
+        for rosmsg in iter_rosmsgs_from_datum(sd):
+          import time # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+          time.sleep(.1)
+            # print('waited')
+          node.publish(rosmsg.topic, rosmsg.msg)
+          n += 1
+          if (n % 1000) == 0:
+            log.info("... broadcasted %s for %s ..." % (n, seg_uri))
+      log.info("... done with %s ..." % seg_uri)
+  log.info("... done broadcasting.")
 
 
 if __name__ == '__main__':
