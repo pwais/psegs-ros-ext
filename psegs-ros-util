@@ -55,6 +55,8 @@ To start a ROS Node that broadcasts a segment:
 import os
 import sys
 
+import numpy as np
+
 ## Logging
 import logging
 LOG_FORMAT = "%(asctime)s\t%(name)-4s %(process)d : %(message)s"
@@ -94,11 +96,11 @@ def to_ros_arr(arr):
   return arr.flatten(order='C').tolist()
 
 
-## PSegs -> ROS: datum conversion::::::::::::::::::::::::::::::::::::::::::::::
+## PSegs -> ROS: datum conversion :::::::::::::::::::::::::::::::::::::::::::::
 
 def transform_to_ros(xform, nanostamp=None):
   """Convert a psegs.datum.Transform to a ROS Transform"""
-  
+
   import tf
   from tf2_msgs.msg import TFMessage
   from geometry_msgs.msg import Transform
@@ -132,6 +134,7 @@ def transform_to_ros(xform, nanostamp=None):
 
 def ci_to_ros_camera_info(ci):
   """Convert a psegs.datum.CameraImage to a ROS CameraInfo"""
+
   from sensor_msgs.msg import CameraInfo
   info = CameraInfo()
   info.header.frame_id = to_ros_frame(ci.sensor_name)
@@ -150,6 +153,7 @@ def ci_to_ros_camera_info(ci):
 
 def ci_to_ros_image(ci):
   """Convert a psegs.datum.CameraImage to a ROS Camera Image"""
+  
   import cv2
   from cv_bridge import CvBridge
   bridge = CvBridge()
@@ -165,6 +169,7 @@ def ci_to_ros_image(ci):
 
 def pc_to_ros_pcl(pc):
   """Convert a psegs.datum.PointCloud to a ROS PCL PointCloud"""
+  
   from sensor_msgs.msg import PointField
   from std_msgs.msg import Header
   import sensor_msgs.point_cloud2 as pcl2
@@ -201,6 +206,7 @@ def pc_to_ros_pcl(pc):
 
 def color_to_ros(color):
   """color in [0, 1] -> ROS color"""
+  
   from std_msgs.msg import ColorRGBA
   r, g, b = np.clip(color, 0, 1).tolist()
   ros_color = ColorRGBA()
@@ -284,22 +290,10 @@ def cuboids_to_ros_marker_array(cuboids):
   return marray
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
+### Self-Test :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
 
 def _create_fake_black_png(hw=(100, 200)):
-  import numpy as np
+  h, w = hw
   img = np.zeros((h, w, 3), dtype=np.uint8)
 
   from PIL import Image
@@ -315,34 +309,54 @@ def _create_fake_black_png(hw=(100, 200)):
 def test_psegs_ros():
   ### Test PSegs -> ROS conversions using PSegs prototypes
 
-  import numpy as np
+  import copy
   from psegs.datum import stamped_datum as sd
 
+  # CameraInfo ----------------------------------------------------------------
   info = ci_to_ros_camera_info(sd.CAMERAIMAGE_PROTO)
   assert str(info)
+  assert info.K == [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+  assert info.P == [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]
 
-  ros_tf = transform_to_ros(sd.TRANSFORM_PROTO)
+  # ROS TF --------------------------------------------------------------------
+  xform = copy.deepcopy(sd.TRANSFORM_PROTO)
+  xform.src_frame = 'src'
+  xform.dest_frame = 'dest'
+  ros_tf = transform_to_ros(xform)
   assert str(ros_tf)
+  assert len(ros_tf.transforms) == 1
+  assert ros_tf.transforms[0].header.frame_id == 'src'
+  assert ros_tf.transforms[0].child_frame_id == 'dest'
 
+  # ROS Camera Image ----------------------------------------------------------
   ci = copy.deepcopy(sd.CAMERAIMAGE_PROTO)
-  ci.image_png = _create_fake_black_png()
+  ci.image_png = _create_fake_black_png(hw=(100, 200))
   image_msg = ci_to_ros_image(ci)
   assert str(image_msg)
+  assert image_msg.height == 100
+  assert image_msg.width == 200
+  assert len(image_msg.data) == (100 * 200 * 3)
 
+  # PCL Point Cloud -----------------------------------------------------------
   pc = copy.deepcopy(sd.POINTCLOUD_PROTO)
   pc.cloud = np.random.rand(10, 3)
   pcl_msg = pc_to_ros_pcl(pc)
   assert str(pcl_msg)
+  assert pcl_msg.fields[0].name == 'x'
+  assert pcl_msg.fields[1].name == 'y'
+  assert pcl_msg.fields[2].name == 'z'
+  assert pcl_msg.fields[3].name == 'rgb'
 
+  # ROS 3D Markers ------------------------------------------------------------
   cuboids = [copy.deepcopy(sd.CUBOID_PROTO)] * 4
   for c in cuboids:
     c.obj_from_ego.src_frame = 'ego'
     c.obj_from_ego.dest_frame = 'obj'
   cube_markers = cuboids_to_ros_marker_array(cuboids)
   assert str(cube_markers)
+  assert len(cube_markers.markers) == 12
 
-  import pdb; pdb.set_trace()
-  print()
+  log.info("Self-test success!")
 
 
 ###############################################################################
