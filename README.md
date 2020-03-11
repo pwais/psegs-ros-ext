@@ -4,6 +4,8 @@
 
 ## Summary
 
+See Docker images [on Dockerhub](https://hub.docker.com/u/psegs).
+
 This repo contains:
  * An [install_ros.sh](install_ros.sh) script that installs
      [ROS Melodic](http://wiki.ros.org/melodic) **with Python 3
@@ -15,9 +17,13 @@ This repo contains:
      be useful outside of this project.
  * A Docker image (published as `psegs/ext-ros-test` that demonstrates
      how to use and test the install.
+ * A Docker image for [PSegs](https://github.com/pwais/psegs) (published as
+     `psegs/ros`) that includes a PSegs-based ROS environment and a tool
+     for converting PSegs `StampedDatum` data to ROS (e.g. to ROS Bags).
+     
 
 
-## Quickstart
+## Quickstart: Vanilla ROS and Python 3
 
 ## Local Self-Test
 
@@ -81,14 +87,39 @@ you view the standard Webviz embedded demo at [https://webviz.io/app/?demo](http
 
 (Note: you might see some errors about the `radar_driver` package).
 
-FMI see the [official Webviz docs](https://github.com/cruise-automation/webviz/blob/e57b3a17f6caafd2d152696c220a6c24888f83e9/packages/webviz-core/src/util/helpModalOpenSource.help.md#loading-data).
+For more info, see the [official Webviz docs](https://github.com/cruise-automation/webviz/blob/e57b3a17f6caafd2d152696c220a6c24888f83e9/packages/webviz-core/src/util/helpModalOpenSource.help.md#loading-data).
+
+
+## Quickstart: PSegs
+
+Use `psegs-util` to start a new ROS-based container using your existing PSegs
+workspace:
+
+```
+PS_IMAGE_NAME=ros PS_CONTAINER_NAME=psegs-ros psegs-util --shell
+```
+
+You'll be dropped into a PSegs environment that has ROS installed.  From there,
+use the `psegs-ros-util` program to convert PSegs data to:
+  * convert PSegs datasets and/or data to ROS bags
+  * view PSegs-supported datasets in Webviz
+
+Run `psegs-ros-util --help` inside the Dockerized shell 
+(or `docker run --rm -it psegs/ros psegs-ros-util` on your local machine)
+for more info.
+
 
 ## Development
 
-Build and test:
+### ROS + Python3
+
+Build and test (might take 30mins from scratch):
 ```
-docker build -t psegs/ext-ros-test:v1 .
-docker run --rm -it -v `pwd`:/opt/psegs-ros-ext psegs/ext-ros-test:v1 bash -c 'pytest -s -vvv test_rospy.py'
+time docker build -t psegs/ext-ros-test:v1 .
+docker run \
+    --rm -it \
+    -v `pwd`:/opt/psegs-ros-ext psegs/ext-ros-test:v1 \
+        pytest -s -vvv test_rospy.py
 ```
 
 Tag and push:
@@ -97,19 +128,21 @@ docker tag psegs/ext-ros-test:v1 psegs/ext-ros-test
 docker push psegs/ext-ros-test
 ```
 
+### PSegs
 
+Note: use a tag that matches the PSegs Docker environment version.
+
+Build and test (might take 30mins from scratch):
 ```
-docker osrf/ros:melodic-desktop-bionic
+time docker build -t psegs/ros:v0.0.1 -f psegs-shell.Dockerfile .
+docker run \
+    --rm -it \
+    -v `pwd`:/opt/psegs-ros-ext psegs/ros:v1 \
+        pytest -s -vvv test_rospy.py
+```
 
-wget https://open-source-webviz-ui.s3.amazonaws.com/demo.bag
-
-apt-get install -y wget ros-melodic-rosbridge-suite
-
-HOSTNAME=10.0.0.8 roslaunch rosbridge_server rosbridge_websocket.launch
-
-chrome://settings/content/insecureContent?search=insecure+content
-
-https://webviz.io/app/?rosbridge-websocket-url=ws://10.0.0.8:9090
-
-
+Tag and push:
+```
+docker tag psegs/ros:v0.0.1 psegs/ros
+docker push psegs/ros
 ```
