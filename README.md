@@ -134,7 +134,7 @@ Note: use a tag that matches the PSegs Docker environment version.
 
 Build and test (might take 30mins from scratch):
 ```
-time docker build -t psegs/ros:v0.0.1 -f psegs-shell.Dockerfile .
+time docker build -t psegs/ros:0.0.1 -f psegs-shell.Dockerfile .
 docker run \
     --rm -it \
     -v `pwd`:/opt/psegs-ros-ext psegs/ros:v1 \
@@ -143,6 +143,6 @@ docker run \
 
 Tag and push:
 ```
-docker tag psegs/ros:v0.0.1 psegs/ros
+docker tag psegs/ros:0.0.1 psegs/ros
 docker push psegs/ros
 ```
