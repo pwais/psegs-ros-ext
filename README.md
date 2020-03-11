@@ -23,7 +23,7 @@ This repo contains:
 
 Download the container and run our [unit tests](test_rospy.py) locally:
 ```
-docker run --rm -it psegs/ext-ros-test bash -c 'pytest test_rospy.py'
+docker run --rm -it psegs/ext-ros-test pytest test_rospy.py
 ```
 
 ## WebViz Demo
