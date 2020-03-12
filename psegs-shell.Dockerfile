@@ -15,6 +15,9 @@ RUN ln -s /opt/psegs-ros-ext/psegs-ros-util /usr/local/bin/psegs-ros-util
 # Tell the user this image has ROS
 RUN echo 'echo -e "  \e[101m\e[97m                         with ROS  \e[m";echo ""' >> /etc/bash.bashrc
 
+# Make all bash shells have ROS
+RUN echo 'source "/opt/ros/melodic/install/setup.bash"' >> /etc/bash.bashrc
+
 WORKDIR /opt/psegs
 
 ENTRYPOINT ["/opt/psegs-ros-ext/ros_entrypoint.sh"]

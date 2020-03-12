@@ -61,7 +61,7 @@ import numpy as np
 ## Logging
 import logging
 LOG_FORMAT = "%(asctime)s\t%(name)-4s %(process)d : %(message)s"
-log = logging.getLogger("ps")
+log = logging.getLogger("psros")
 log.setLevel(logging.INFO)
 console_handler = logging.StreamHandler(sys.stderr)
 console_handler.setFormatter(logging.Formatter(LOG_FORMAT))
@@ -75,7 +75,7 @@ def import_psegs_or_die(path):
     return psegs
   except Exception as e:
     assert False, \
-      "Could not find PSegs root, expected %s; error: %s" % (path, e))
+      "Could not find PSegs root, expected %s; error: %s" % (path, e)
 
 
 ###############################################################################
@@ -317,11 +317,11 @@ def iter_rosmsgs_from_datum(stamped_datum):
   transforms = []
   if sd.camera_image:
     namespace = to_ros_topic(sd.uri.topic)
-    yield ROSMsg(
+    yield ROSMsgEntry(
       timestamp=msg_t,
       topic=namespace + '/image',
       msg=ci_to_ros_image(sd.camera_image))
-    yield ROSMsg(
+    yield ROSMsgEntry(
       timestamp=msg_t,
       topic=namespace + '/camera_info',
       msg=ci_to_ros_camera_info(sd.camera_image))
@@ -329,7 +329,7 @@ def iter_rosmsgs_from_datum(stamped_datum):
     transforms += [sd.camera_image.ego_pose, sd.camera_image.ego_to_sensor]
 
   elif sd.point_cloud:
-    yield ROSMsg(
+    yield ROSMsgEntry(
       timestamp=msg_t,
       topic=to_ros_topic(sd.uri.topic),
       msg=pc_to_ros_pcl(sd.point_cloud))
@@ -337,7 +337,7 @@ def iter_rosmsgs_from_datum(stamped_datum):
     transforms += [sd.point_cloud.ego_pose, sd.point_cloud.ego_to_sensor]
 
   elif sd.cuboids:
-    yield ROSMsg(
+    yield ROSMsgEntry(
       timestamp=msg_t,
       topic=to_ros_topic(sd.uri.topic),
       msg=cuboids_to_ros_marker_array(sd.cuboids))
@@ -347,7 +347,7 @@ def iter_rosmsgs_from_datum(stamped_datum):
     transforms += [sd.transform]
   
   for transform in transforms:
-    yield ROSMsg(
+    yield ROSMsgEntry(
       timestamp=msg_t,
       topic='/tf',
       msg=transform_to_ros(transform))
@@ -468,7 +468,7 @@ def main(args=None):
   elif args.broadcast:
     run_rosnode(args)
   elif args.self_test:
-    test_psegs_ros()
+    test_psegs_ros(args)
 
 
 def get_segment_uris(args):
