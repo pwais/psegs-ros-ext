@@ -262,6 +262,29 @@ def _box_sides_marker(front_pts, back_pts, color):
   return m
 
 
+def _box_label_marker(xyz, txt, color):
+  from visualization_msgs.msg import Marker
+
+  m = Marker()
+  m.type = Marker.TEXT_VIEW_FACING
+  m.text = str(txt)
+  m.action = Marker.MODIFY  # or add
+  m.color = color
+  m.scale.x = 0.3
+  m.scale.y = 0.3
+  m.scale.z = 0.3
+  
+  m.pose.position.x = xyz[0]
+  m.pose.position.y = xyz[1]
+  m.pose.position.z = xyz[2]
+  m.pose.orientation.x = 0.0
+  m.pose.orientation.y = 0.0
+  m.pose.orientation.z = 0.0
+  m.pose.orientation.w = 1.0
+
+  return m
+
+
 def cuboids_to_ros_marker_array(cuboids):
   """Convert a list of psegs.datum.Cuboid objects to ROS 3d Markers"""
   
@@ -285,11 +308,14 @@ def cuboids_to_ros_marker_array(cuboids):
     box_xyz = cuboid.get_box3d()
     front = box_xyz[:4, :]
     back = box_xyz[4:, :]
+    top = box_xyz[(0, 1, 4, 5), :]
+    top_center = np.mean(top, axis=0)
 
     box_markers = [
       _box_face_marker(front, front_color),
       _box_sides_marker(front, back, sides_color),
       _box_face_marker(back, back_color),
+      _box_label_marker(top_center, cuboid.track_id, sides_color),
     ]
     for mid, m in enumerate(box_markers):
       m.id = obj_id * 10 + mid
@@ -301,56 +327,167 @@ def cuboids_to_ros_marker_array(cuboids):
   return marray
 
 
+def cuboids_to_ros_image_markers(ci, cuboids):
+  """Project a list of psegs.datum.Cuboid objects (`cuboids`) into the given
+  psegs.datum.CameraImage `ci` and return a list of ROS ImageMarkers"""
+  markers = []
+
+  for obj_id, cuboid in enumerate(cuboids):
+    from std_msgs.msg import Header
+    header = Header()
+    header.frame_id = to_ros_frame(ci.sensor_name)
+    header.stamp = nanostamp_to_rostime(cuboid.timestamp)
+
+    from visualization_msgs.msg import ImageMarker
+    m = ImageMarker()
+    m.id = obj_id
+    m.ns = cuboid.track_id
+    m.header = header
+    m.type = ImageMarker.LINE_LIST
+    m.action = ImageMarker.ADD
+    m.scale = 0.5
+
+    from oarphpy.plotting import hash_to_rbg
+    base_color = np.array(hash_to_rbg(cuboid.category_name)) / 255.
+    front_color = color_to_ros(base_color + 0.3)
+    back_color = color_to_ros(base_color - 0.3)
+    sides_color = color_to_ros(base_color)
+
+    def project_and_add(start, end, color):
+      xyd = ci.project_ego_to_image(np.array([start, end]))
+      if xyd.shape[0] != 2:
+        return # At least one point was offscreen / behind camera
+      
+      from geometry_msgs.msg import Point
+      sp = Point()
+      sp.x = xyd[0, 0]
+      sp.y = xyd[0, 1]
+      m.points.append(sp)
+      
+      ep = Point()
+      ep.x = xyd[1, 0]
+      ep.y = xyd[1, 1]
+      m.points.append(ep)
+
+      m.outline_colors.append(color)
+    
+    box_xyz = cuboid.get_box3d()
+    front = box_xyz[:4, :]
+    for i in range(5):
+      project_and_add(front[i % 4, :], front[(i+1) % 4, :], front_color)
+    
+    back = box_xyz[4:, :]
+    for i in range(5):
+      project_and_add(back[i % 4, :], back[(i+1) % 4, :], back_color)
+    
+    for start, end in zip(front.tolist(), back.tolist()):
+      project_and_add(start, end, sides_color)
+    
+    # Only save the marker if we have some on-screen points
+    if len(m.points) > 0:
+      markers.append(m)
+  
+  return markers
+
+
 ### PSegs -> ROS: RDD[StampedDatum] conversion ::::::::::::::::::::::::::::::::
 
 # A container compatible with both ROSBag as well as ROS Publishers
 ROSMsgEntry = collections.namedtuple(
                 'ROSMsgEntry', ('topic', 'timestamp', 'msg'))
 
-def iter_rosmsgs_from_datum(stamped_datum):
-  """Given a PSegs `StampedDatum`, generate one or more `ROSMsgEntry`
-  instances"""
-  
-  sd = stamped_datum
-  msg_t = nanostamp_to_rostime(sd.uri.timestamp)
+class StampedDatumToROSMsgConverter(object):
 
-  transforms = []
-  if sd.camera_image:
-    namespace = to_ros_topic(sd.uri.topic)
-    yield ROSMsgEntry(
-      timestamp=msg_t,
-      topic=namespace + '/image',
-      msg=ci_to_ros_image(sd.camera_image))
-    yield ROSMsgEntry(
-      timestamp=msg_t,
-      topic=namespace + '/camera_info',
-      msg=ci_to_ros_camera_info(sd.camera_image))
+  def __init__(
+            self,
+            gen_3d_image_markers=True,
+            gen_cloud_image_markers=True):
+    self._gen_3d_image_markers = gen_3d_image_markers
+    self._gen_cloud_image_markers = gen_cloud_image_markers
+    self._topic_to_last_camera_image = {}
 
-    transforms += [sd.camera_image.ego_pose, sd.camera_image.ego_to_sensor]
+  @classmethod
+  def create_from_prog_args(cls, args):
+    return cls(
+      gen_3d_image_markers=not args.no_image_markers,
+      gen_cloud_image_markers=not args.no_image_clouds)
 
-  elif sd.point_cloud:
-    yield ROSMsgEntry(
-      timestamp=msg_t,
-      topic=to_ros_topic(sd.uri.topic),
-      msg=pc_to_ros_pcl(sd.point_cloud))
+  def _maybe_cache_sd(self, sd):
+    if not (sd.camera_image and 
+        (self._gen_3d_image_markers or self._gen_cloud_image_markers)):
+      return  
+    self._topic_to_last_camera_image[sd.uri.topic] = sd.camera_image
+
+  def _maybe_gen_image_markers(self, sd):
+    for ci_topic, ci in self._topic_to_last_camera_image.items():
+      namespace = to_ros_topic(ci_topic)
+      marker_topic = namespace + to_ros_topic(sd.uri.topic)
+      img_markers = cuboids_to_ros_image_markers(ci, sd.cuboids)
+      for marker in img_markers:
+        yield ROSMsgEntry(
+          timestamp=nanostamp_to_rostime(sd.uri.timestamp),
+          topic=marker_topic,
+          msg=marker)
+        print('img marker')
+
+  def _maybe_gen_image_clouds(self, sd):
+    if False:
+      yield
+    return
+
+  def iter_rosmsgs_from_datum(self, stamped_datum):
+    """Given a PSegs `StampedDatum`, generate one or more `ROSMsgEntry`
+    instances"""
     
-    transforms += [sd.point_cloud.ego_pose, sd.point_cloud.ego_to_sensor]
+    sd = stamped_datum
+    msg_t = nanostamp_to_rostime(sd.uri.timestamp)
 
-  elif sd.cuboids:
-    yield ROSMsgEntry(
-      timestamp=msg_t,
-      topic=to_ros_topic(sd.uri.topic),
-      msg=cuboids_to_ros_marker_array(sd.cuboids))
-    transforms += [c.ego_pose for c in sd.cuboids]
+    self._maybe_cache_sd(sd)
 
-  elif sd.transform:
-    transforms += [sd.transform]
-  
-  for transform in transforms:
-    yield ROSMsgEntry(
-      timestamp=msg_t,
-      topic='/tf',
-      msg=transform_to_ros(transform))
+    transforms = []
+    if sd.camera_image:
+      namespace = to_ros_topic(sd.uri.topic)
+      yield ROSMsgEntry(
+        timestamp=msg_t,
+        topic=namespace + '/image',
+        msg=ci_to_ros_image(sd.camera_image))
+      yield ROSMsgEntry(
+        timestamp=msg_t,
+        topic=namespace + '/camera_info',
+        msg=ci_to_ros_camera_info(sd.camera_image))
+
+      transforms += [sd.camera_image.ego_pose, sd.camera_image.ego_to_sensor]
+
+    elif sd.point_cloud:
+      yield ROSMsgEntry(
+        timestamp=msg_t,
+        topic=to_ros_topic(sd.uri.topic),
+        msg=pc_to_ros_pcl(sd.point_cloud))
+      
+      transforms += [sd.point_cloud.ego_pose, sd.point_cloud.ego_to_sensor]
+
+      for msg in self._maybe_gen_image_clouds(sd):
+        yield msg
+
+    elif sd.cuboids:
+      yield ROSMsgEntry(
+        timestamp=msg_t,
+        topic=to_ros_topic(sd.uri.topic),
+        msg=cuboids_to_ros_marker_array(sd.cuboids))
+      
+      transforms += [c.ego_pose for c in sd.cuboids]
+
+      for msg in self._maybe_gen_image_markers(sd):
+        yield msg
+
+    elif sd.transform:
+      transforms += [sd.transform]
+    
+    for transform in transforms:
+      yield ROSMsgEntry(
+        timestamp=msg_t,
+        topic='/tf',
+        msg=transform_to_ros(transform))
 
 
 ### Self-Test :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
@@ -395,6 +532,8 @@ def test_psegs_ros(args):
   # ROS Camera Image ----------------------------------------------------------
   ci = copy.deepcopy(sd.CAMERAIMAGE_PROTO)
   ci.image_png = _create_fake_black_png(hw=(100, 200))
+  ci.height = 100
+  ci.width = 200
   image_msg = ci_to_ros_image(ci)
   assert str(image_msg)
   assert image_msg.height == 100
@@ -414,11 +553,19 @@ def test_psegs_ros(args):
   # ROS 3D Markers ------------------------------------------------------------
   cuboids = [copy.deepcopy(sd.CUBOID_PROTO)] * 4
   for c in cuboids:
+    c.length_meters = 1
+    c.height_meters = 1
+    c.width_meters = 1
+    c.obj_from_ego.translation[0] = 1
     c.obj_from_ego.src_frame = 'ego'
     c.obj_from_ego.dest_frame = 'obj'
   cube_markers = cuboids_to_ros_marker_array(cuboids)
   assert str(cube_markers)
-  assert len(cube_markers.markers) == 12
+  assert len(cube_markers.markers) == 16
+
+  # ROS Cuboid 2D Image Markers -----------------------------------------------
+  image_markers = cuboids_to_ros_image_markers(ci, cuboids)
+  assert [str(m) for m in image_markers]
 
   log.info("Self-test success!")
 
@@ -443,6 +590,12 @@ def create_arg_parser():
   parser.add_argument(
     '--bag-compression', default='lz4',
     help='Use this ROS Bag compression scheme [default %(default)s]')
+  parser.add_argument(
+    '--no-image-markers', default=False, action='store_true',
+    help='Do not automatically generate image markers from 3D markers')
+  parser.add_argument(
+    '--no-image-clouds', default=False, action='store_true',
+    help='Do not automatically generate image markers from PointClouds')
 
   # Actions
   parser.add_argument(
@@ -512,19 +665,26 @@ def export_bags(args):
       log.info("... writing a bag to %s ..." % bag_dest)
       
       sd_rdd = StampedDatumDB.get_segment_datum_rdd(
-                  spark, seg_uri, time_ordered=True)
+                      spark, seg_uri, time_ordered=True)
       log.info("... addressed datums for %s ..." % bag_dest)
 
       comp = args.bag_compression
       n_written = 0
       with rosbag.Bag(bag_dest, mode='w', compression=comp) as bag:
+        conv = StampedDatumToROSMsgConverter()
         for sd in sd_rdd.toLocalIterator():
-          for rosmsg in iter_rosmsgs_from_datum(sd):
+          for rosmsg in conv.iter_rosmsgs_from_datum(sd):
             bag.write(rosmsg.topic, rosmsg.msg, t=rosmsg.timestamp)
             n_written += 1
             if (n_written % 1000) == 0:
               log.info("... wrote %s to %s ...\n\n%s\n\n" % (
                 n_written, bag_dest, str(bag)))
+        
+
+          if n_written > 100:
+            break
+      
+      
       log.info("... done writing %s ..." % bag_dest)
   log.info("... wrote all bags to %s ." % args.to_bag)
 
@@ -563,8 +723,9 @@ def run_rosnode(args):
       log.info("... addressed datums for %s ..." % seg_uri)
 
       n = 0
+      conv = StampedDatumToROSMsgConverter()
       for sd in sd_rdd.toLocalIterator():
-        for rosmsg in iter_rosmsgs_from_datum(sd):
+        for rosmsg in conv.iter_rosmsgs_from_datum(sd):
           import time # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
           time.sleep(.1)
             # print('waited')
