@@ -50,17 +50,17 @@ mycomputer $ docker run --net=host -it psegs/ext-ros-test bash
 ```
 
 ```shell
-indocker $ wget https://open-source-webviz-ui.s3.amazonaws.com/demo.bag
+/opt/psegs-ros-ext $ wget https://open-source-webviz-ui.s3.amazonaws.com/demo.bag
 demo.bag 100%[==========================>] 166.51M  7.44MB/s  in 97s
 
-# Use our ROS Install
-indocker $ source /opt/ros/melodic/install/setup.bash
+# Verify your install with unit tests if you wish
+/opt/psegs-ros-ext $ pytest test_rospy.py
 
 # If you have multiple NICs on your machine, set HOSTNAME
-indocker $ HOSTNAME=10.0.0.8 roslaunch rosbridge_server rosbridge_websocket.launch &
+/opt/psegs-ros-ext $ HOSTNAME=10.0.0.8 roslaunch rosbridge_server rosbridge_websocket.launch &
 (ros should start up)
 
-indocker $ rosbag play --pause demo.bag
+/opt/psegs-ros-ext $ rosbag play --pause demo.bag
 (hit spacebar to play / pause)
 ```
 
