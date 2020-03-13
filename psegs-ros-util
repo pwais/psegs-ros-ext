@@ -215,11 +215,12 @@ def pc_to_ros_pcl(pc):
   return pcl_msg
 
 
-def color_to_ros(color):
-  """color in [0, 1] -> ROS color"""
+def color_to_ros(color, limit=1):
+  """Color in [0, limit] -> ROS color.  3D markers are in [0, 1], 
+  ImageMarkers are in [0, 255]."""
   
   from std_msgs.msg import ColorRGBA
-  r, g, b = np.clip(color, 0, 1).tolist()
+  r, g, b = np.clip(color, 0, limit).tolist()
   ros_color = ColorRGBA()
   ros_color.r = r
   ros_color.g = g
@@ -345,13 +346,16 @@ def cuboids_to_ros_image_markers(ci, cuboids):
     m.header = header
     m.type = ImageMarker.LINE_LIST
     m.action = ImageMarker.ADD
-    m.scale = 0.5
+    m.scale = 10.0
+    m.filled = 1
 
+
+    # NB: ImageMarker colors are in [0, 255]; 3D markers are in [0, 1]
     from oarphpy.plotting import hash_to_rbg
-    base_color = np.array(hash_to_rbg(cuboid.category_name)) / 255.
-    front_color = color_to_ros(base_color + 0.3)
-    back_color = color_to_ros(base_color - 0.3)
-    sides_color = color_to_ros(base_color)
+    base_color = np.array(hash_to_rbg(cuboid.category_name))
+    front_color = color_to_ros(base_color + 0.3, limit=255)
+    back_color = color_to_ros(base_color - 0.3, limit=255)
+    sides_color = color_to_ros(base_color, limit=255)
 
     def project_and_add(start, end, color):
       xyd = ci.project_ego_to_image(np.array([start, end]))
@@ -368,7 +372,7 @@ def cuboids_to_ros_image_markers(ci, cuboids):
       ep.x = xyd[1, 0]
       ep.y = xyd[1, 1]
       m.points.append(ep)
-
+      m.outline_color = color # FUCKERS!!!!~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
       m.outline_colors.append(color)
     
     box_xyz = cuboid.get_box3d()
@@ -388,6 +392,42 @@ def cuboids_to_ros_image_markers(ci, cuboids):
       markers.append(m)
   
   return markers
+
+
+def pc_to_ros_image_marker(ci, point_cloud):
+  """Project a psegs.datum.PointCloud instance `point_cloud` into the given
+  psegs.datum.CameraImage `ci` and return a ROS ImageMarker"""
+
+  from std_msgs.msg import Header
+  header = Header()
+  header.frame_id = to_ros_frame(ci.sensor_name)
+  header.stamp = nanostamp_to_rostime(point_cloud.timestamp)
+
+  from visualization_msgs.msg import ImageMarker
+  m = ImageMarker()
+  m.id = hash(point_cloud.sensor_name) % 2147483647
+  m.ns = point_cloud.sensor_name
+  m.header = header
+  m.type = ImageMarker.POINTS
+  m.action = ImageMarker.ADD
+  m.scale = 1.0
+
+  xyd = ci.project_ego_to_image(point_cloud.cloud, omit_offscreen=True)
+  # xyd = xyd[::10] # subsample ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  
+  from psegs.util.plotting import rgb_for_distance
+  colors = rgb_for_distance(xyd[:,2])
+
+  from geometry_msgs.msg import Point
+  for xy, color in zip(xyd[:,:2], colors):
+    p = Point()
+    p.x = xy[0]
+    p.y = xy[1]
+    m.points.append(p)
+    m.outline_colors.append(color_to_ros(color, limit=255))
+      # NB: ImageMarker colors are in [0, 255]; 3D markers are in [0, 1]
+
+  return m
 
 
 ### PSegs -> ROS: RDD[StampedDatum] conversion ::::::::::::::::::::::::::::::::
@@ -428,12 +468,16 @@ class StampedDatumToROSMsgConverter(object):
           timestamp=nanostamp_to_rostime(sd.uri.timestamp),
           topic=marker_topic,
           msg=marker)
-        print('img marker')
 
   def _maybe_gen_image_clouds(self, sd):
-    if False:
-      yield
-    return
+    for ci_topic, ci in self._topic_to_last_camera_image.items():
+      namespace = to_ros_topic(ci_topic)
+      marker_topic = namespace + to_ros_topic(sd.uri.topic)
+      marker = pc_to_ros_image_marker(ci, sd.point_cloud)
+      yield ROSMsgEntry(
+          timestamp=nanostamp_to_rostime(sd.uri.timestamp),
+          topic=marker_topic,
+          msg=marker)
 
   def iter_rosmsgs_from_datum(self, stamped_datum):
     """Given a PSegs `StampedDatum`, generate one or more `ROSMsgEntry`
@@ -567,6 +611,11 @@ def test_psegs_ros(args):
   image_markers = cuboids_to_ros_image_markers(ci, cuboids)
   assert [str(m) for m in image_markers]
 
+  # ROS PointCloud 2D Image Markers -------------------------------------------
+  pc_image_marker = pc_to_ros_image_marker(ci, pc)
+  assert str(pc_image_marker)
+  assert len(pc_image_marker.points) == pc.cloud.shape[0]
+
   log.info("Self-test success!")
 
 
@@ -681,7 +730,7 @@ def export_bags(args):
                 n_written, bag_dest, str(bag)))
         
 
-          if n_written > 100:
+          if n_written > 200:
             break
       
       
