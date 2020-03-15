@@ -413,7 +413,7 @@ def pc_to_ros_image_marker(ci, point_cloud, every_nth_pt=10):
   xyd = ci.project_ego_to_image(point_cloud.cloud, omit_offscreen=True)
   if every_nth_pt > 0:
     xyd = xyd[::every_nth_pt]
-  
+
   from psegs.util.plotting import rgb_for_distance
   colors = rgb_for_distance(xyd[:,2])
 
@@ -611,9 +611,9 @@ def test_psegs_ros(args):
   assert [str(m) for m in image_markers]
 
   # ROS PointCloud 2D Image Markers -------------------------------------------
-  pc_image_marker = pc_to_ros_image_marker(ci, pc)
+  pc_image_marker = pc_to_ros_image_marker(ci, pc, every_nth_pt=2)
   assert str(pc_image_marker)
-  assert len(pc_image_marker.points) == pc.cloud.shape[0]
+  assert len(pc_image_marker.points) == pc.cloud.shape[0] / 2
 
   log.info("Self-test success!")
 

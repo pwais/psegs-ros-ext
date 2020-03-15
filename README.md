@@ -137,8 +137,8 @@ Build and test (might take 30mins from scratch):
 time docker build -t psegs/ros:0.0.1 -f psegs-shell.Dockerfile .
 docker run \
     --rm -it \
-    -v `pwd`:/opt/psegs-ros-ext psegs/ros:v1 \
-        pytest -s -vvv test_rospy.py
+    -v `pwd`:/opt/psegs-ros-ext psegs/ros:0.0.1 \
+        psegs-ros-util --self-test
 ```
 
 Tag and push:
