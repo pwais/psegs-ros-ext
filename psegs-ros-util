@@ -225,7 +225,7 @@ def color_to_ros(color, limit=1):
   ros_color.r = r
   ros_color.g = g
   ros_color.b = b
-  ros_color.a = 1.
+  ros_color.a = 1
   return ros_color
 
 
@@ -328,33 +328,33 @@ def cuboids_to_ros_marker_array(cuboids):
   return marray
 
 
-def cuboids_to_ros_image_markers(ci, cuboids):
+def cuboids_to_ros_image_marker(ci, cuboids):
   """Project a list of psegs.datum.Cuboid objects (`cuboids`) into the given
-  psegs.datum.CameraImage `ci` and return a list of ROS ImageMarkers"""
-  markers = []
+  psegs.datum.CameraImage `ci` and return a single ROS ImageMarker.
+  (Note that there's no public ImageMarkerArray type, so we must pack
+  everything into one marker)."""
+  
+  from std_msgs.msg import Header
+  header = Header()
+  header.frame_id = to_ros_frame(ci.sensor_name)
+  t = min((c.timestamp for c in cuboids) or (ci.timestamp,))
+  header.stamp = nanostamp_to_rostime(t)
+
+  from visualization_msgs.msg import ImageMarker
+  m = ImageMarker()
+  m.id = 1
+  m.ns = ci.sensor_name
+  m.header = header
+  m.type = ImageMarker.LINE_LIST
+  m.action = ImageMarker.ADD
+  m.scale = 10.0
+  m.filled = 1
+
+  # Sadly, webviz et al does not support one color per line, unlike in 3d
+  # Markers.  NB: ImageMarker colors are in [0, 255]; 3D markers are in [0, 1]
+  m.outline_color = color_to_ros((255, 255, 255), limit=255)
 
   for obj_id, cuboid in enumerate(cuboids):
-    from std_msgs.msg import Header
-    header = Header()
-    header.frame_id = to_ros_frame(ci.sensor_name)
-    header.stamp = nanostamp_to_rostime(cuboid.timestamp)
-
-    from visualization_msgs.msg import ImageMarker
-    m = ImageMarker()
-    m.id = obj_id
-    m.ns = cuboid.track_id
-    m.header = header
-    m.type = ImageMarker.LINE_LIST
-    m.action = ImageMarker.ADD
-    m.scale = 10.0
-    m.filled = 1
-
-    # NB: ImageMarker colors are in [0, 255]; 3D markers are in [0, 1]
-    from oarphpy.plotting import hash_to_rbg
-    m.outline_color = color_to_ros(
-                        np.array(hash_to_rbg(cuboid.category_name)),
-                        limit=255)
-
     def project_and_add(start, end):
       xyd = ci.project_ego_to_image(np.array([start, end]))
       if xyd.shape[0] != 2:
@@ -382,12 +382,8 @@ def cuboids_to_ros_image_markers(ci, cuboids):
     
     for start, end in zip(front.tolist(), back.tolist()):
       project_and_add(start, end)
-    
-    # Only save the marker if we have some on-screen points
-    if len(m.points) > 0:
-      markers.append(m)
   
-  return markers
+  return m
 
 
 def pc_to_ros_image_marker(ci, point_cloud, every_nth_pt=10):
@@ -461,12 +457,11 @@ class StampedDatumToROSMsgConverter(object):
     for ci_topic, ci in self._topic_to_last_camera_image.items():
       namespace = to_ros_topic(ci_topic)
       marker_topic = namespace + to_ros_topic(sd.uri.topic)
-      img_markers = cuboids_to_ros_image_markers(ci, sd.cuboids)
-      for marker in img_markers:
-        yield ROSMsgEntry(
-          timestamp=nanostamp_to_rostime(sd.uri.timestamp),
-          topic=marker_topic,
-          msg=marker)
+      img_marker = cuboids_to_ros_image_marker(ci, sd.cuboids)
+      yield ROSMsgEntry(
+        timestamp=nanostamp_to_rostime(sd.uri.timestamp),
+        topic=marker_topic,
+        msg=img_marker)
 
   def _maybe_gen_image_clouds(self, sd):
     for ci_topic, ci in self._topic_to_last_camera_image.items():
@@ -607,8 +602,9 @@ def test_psegs_ros(args):
   assert len(cube_markers.markers) == 16
 
   # ROS Cuboid 2D Image Markers -----------------------------------------------
-  image_markers = cuboids_to_ros_image_markers(ci, cuboids)
-  assert [str(m) for m in image_markers]
+  image_marker = cuboids_to_ros_image_marker(ci, cuboids)
+  assert str(image_marker)
+  assert len(image_marker.points) == 12 * len(cuboids)
 
   # ROS PointCloud 2D Image Markers -------------------------------------------
   pc_image_marker = pc_to_ros_image_marker(ci, pc, every_nth_pt=2)
@@ -731,7 +727,7 @@ def export_bags(args):
             n_written += 1
             if (n_written % 1000) == 0:
               log.info("... wrote %s to %s ...\n\n%s\n\n" % (
-                n_written, bag_dest, str(bag)))      
+                n_written, bag_dest, str(bag)))
       log.info("... done writing %s ..." % bag_dest)
   log.info("... wrote all bags to %s ." % args.to_bag)
 
