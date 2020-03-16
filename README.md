@@ -1,6 +1,7 @@
 # PSegs ROS Extension
 
 [![License](http://img.shields.io/:license-apache-orange.svg)](http://www.apache.org/licenses/LICENSE-2.0)
+[![Build Status](https://circleci.com/gh/pwais/psegs-ros-ext.png?style=shield)](https://circleci.com/gh/pwais/psegs-ros-ext/tree/master)
 
 ## Summary
 
@@ -146,3 +147,4 @@ Tag and push:
 docker tag psegs/ros:0.0.1 psegs/ros
 docker push psegs/ros
 ```
+
