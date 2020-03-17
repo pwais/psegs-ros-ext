@@ -1,0 +1,12 @@
+version: 2
+jobs:
+  build:
+    machine: true
+    steps:
+      - checkout
+      - run:
+          name: "Run ROS-Python3 Tests"
+          command: docker run --rm -it psegs/ext-ros-test pytest test_rospy.py
+      - run:
+          name: "Run PSegs-ROS Tests"
+          command: docker run --rm -it psegs/ros psegs-ros-util --self-test

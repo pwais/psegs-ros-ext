@@ -1,0 +1,785 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# vim: tabstop=2 shiftwidth=2 expandtab
+
+# Copyright 2020 Maintainers of PSegs-ROS-Ext
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+
+USAGE = """
+\u001b[1m psegs-ros-util: A tool for using PSegs data with ROS. \u001b[0m
+
+Note: run psegs-util --help for tools to browse available data.
+
+\u001b[1m ==== Testing ==== \u001b[0m
+To ensure the integrity of this tool, use:
+\033[92m $ psegs-ros-util --self-test \033[0m
+
+\u001b[1m ==== PSegs <=> ROS Bag ==== \u001b[0m
+To export a segment to a ROS Bag:
+\033[92m $ psegs-ros-util --segments seg1 --to-bag /tmp/my.bag \033[0m
+
+To export mutiple segments, one segment per Bag to a directory:
+\033[92m $ psegs-ros-util --segments seg1,seg2 --to-bag /tmp/my_bags \033[0m
+
+Note you can also use a PSegs URI if your data has duplicate segment IDs:
+\033[92m $ psegs-ros-util --segments psegs://split=train&segment_id=seg1 --to-bag /tmp/my.bag \033[0m
+
+
+\u001b[1m ==== PSegs <=> ROS Node (e.g. Webviz) ==== \u001b[0m
+First start a `roscore` and/or launch a `rosbridge_server` following the 
+instructions in the PSegs-ROS-Ext README.md.
+
+To start a ROS Node that broadcasts a segment:
+\033[92m $ psegs-ros-util --segments seg1 --broadcast \033[0m
+
+"""
+
+
+
+###############################################################################
+### Utils
+
+import collections
+import os
+import sys
+
+import numpy as np
+
+## Logging
+import logging
+LOG_FORMAT = "%(asctime)s\t%(name)-4s %(process)d : %(message)s"
+log = logging.getLogger("psros")
+log.setLevel(logging.INFO)
+console_handler = logging.StreamHandler(sys.stderr)
+console_handler.setFormatter(logging.Formatter(LOG_FORMAT))
+log.addHandler(console_handler)
+
+
+def import_psegs_or_die(path):
+  sys.path.append(path)
+  try:
+    import psegs
+    return psegs
+  except Exception as e:
+    assert False, \
+      "Could not find PSegs root, expected %s; error: %s" % (path, e)
+
+
+###############################################################################
+### PSegs <=> ROS
+
+### Utils :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+
+def nanostamp_to_rostime(nanostamp):
+  # For a good time see:
+  # https://github.com/pgao/roscpp_core/commit/dffa31afe8d7f1268a3fa227408aeb6e04a28b87#diff-65b9485bd6b5d3fb4b7a84cd975c3967L157
+  import rospy
+  return rospy.Time(
+            secs=int(nanostamp / 1000000000),
+            nsecs=int(nanostamp % 1000000000))
+
+
+def to_ros_frame(s):
+  s = s.replace('|', '_')
+  s = s.replace('/', '_')
+  return s
+
+
+def to_ros_topic(s):
+  s = s.replace('|', '_')
+  return '/' + s
+
+
+def to_ros_arr(arr):
+  return arr.flatten(order='C').tolist()
+
+
+## PSegs -> ROS: datum conversion :::::::::::::::::::::::::::::::::::::::::::::
+
+def transform_to_ros(xform, nanostamp=None):
+  """Convert a psegs.datum.Transform to a ROS Transform"""
+
+  import tf
+  from tf2_msgs.msg import TFMessage
+  from geometry_msgs.msg import Transform
+  from geometry_msgs.msg import TransformStamped
+
+  tf_msg = TFMessage()
+  tf_transform = TransformStamped()
+  if nanostamp is not None:
+    tf_transform.header.stamp = nanostamp_to_rostime(nanostamp)
+  
+  tf_transform.header.frame_id = to_ros_frame(xform.src_frame)
+  tf_transform.child_frame_id = to_ros_frame(xform.dest_frame)
+
+  transform = Transform()
+  r_4x4 = np.ones((4, 4))
+  r_4x4[:3, :3] = xform.rotation
+  q = tf.transformations.quaternion_from_matrix(r_4x4)
+  transform.rotation.x = q[0]
+  transform.rotation.y = q[1]
+  transform.rotation.z = q[2]
+  transform.rotation.w = q[3]
+
+  transform.translation.x = xform.translation[0]
+  transform.translation.y = xform.translation[1]
+  transform.translation.z = xform.translation[2]
+
+  tf_transform.transform = transform
+  tf_msg.transforms.append(tf_transform)
+  return tf_msg
+
+
+def ci_to_ros_camera_info(ci):
+  """Convert a psegs.datum.CameraImage to a ROS CameraInfo"""
+
+  from sensor_msgs.msg import CameraInfo
+  info = CameraInfo()
+  info.header.frame_id = to_ros_frame(ci.sensor_name)
+  info.header.stamp = nanostamp_to_rostime(ci.timestamp)
+  info.width = ci.width
+  info.height = ci.height
+  info.distortion_model = 'plumb_bob'
+
+  info.K = to_ros_arr(ci.K)
+  P = np.zeros((3, 4))
+  P[:3, :3] = ci.K
+  info.P = to_ros_arr(P)
+
+  return info
+
+
+def ci_to_ros_image(ci):
+  """Convert a psegs.datum.CameraImage to a ROS Camera Image"""
+  
+  import cv2
+  from cv_bridge import CvBridge
+  bridge = CvBridge()
+
+  img_arr = np.asarray(ci.image_png, dtype=np.uint8)
+  cv_img = cv2.imdecode(img_arr, cv2.IMREAD_UNCHANGED)
+  ros_img_msg = bridge.cv2_to_imgmsg(cv_img, encoding='bgr8')
+  ros_img_msg.header.frame_id = to_ros_frame(ci.sensor_name)
+  ros_img_msg.header.stamp = nanostamp_to_rostime(ci.timestamp)
+  
+  return ros_img_msg
+
+
+def pc_to_ros_pcl(pc):
+  """Convert a psegs.datum.PointCloud to a ROS PCL PointCloud"""
+  
+  from sensor_msgs.msg import PointField
+  from std_msgs.msg import Header
+  import sensor_msgs.point_cloud2 as pcl2
+  
+  header = Header()
+  header.frame_id = 'ego' # fixme? KITTI~~~~~~~~~~~~~~~~~~~~~~~~` to_ros_frame(pc.sensor_name)
+  header.stamp = nanostamp_to_rostime(pc.timestamp)
+
+  xyz = pc.cloud.astype(np.float32)
+  assert xyz.shape[-1] == 3
+
+  from psegs.util.plotting import rgb_for_distance
+  colors = rgb_for_distance(np.linalg.norm(xyz, axis=1))
+
+  # Below we encode per-point RGB colors by packing channel byte values into a
+  # 32-bit int.  Based upon:
+  # https://gist.github.com/lucasw/ea04dcd65bc944daea07612314d114bb#file-create_cloud_xyzrgb-py-L28
+  # https://github.com/cruise-automation/webviz/blob/2e7db3aafffec39b541728668c97ce7d83eee007/packages/webviz-core/src/panels/ThreeDimensionalViz/commands/Pointclouds/PointCloudBuilder.js#L117
+  colors = colors.astype(int)
+  colors_uint32 = (
+    (2**16) * colors[:, 0] + (2**8) * colors[:, 1] + 1 * colors[:, 2])
+
+  points = [pt + [c] for pt, c in zip(xyz.tolist(), colors_uint32)]
+
+  fields = [PointField('x', 0, PointField.FLOAT32, 1),
+            PointField('y', 4, PointField.FLOAT32, 1),
+            PointField('z', 8, PointField.FLOAT32, 1),
+            PointField('rgb', 12, PointField.UINT32, 1)]
+
+  pcl_msg = pcl2.create_cloud(header, fields, points)
+
+  return pcl_msg
+
+
+def color_to_ros(color, limit=1):
+  """Color in [0, limit] -> ROS color.  3D markers are in [0, 1], 
+  ImageMarkers are in [0, 255]."""
+  
+  from std_msgs.msg import ColorRGBA
+  r, g, b = np.clip(color, 0, limit).tolist()
+  ros_color = ColorRGBA()
+  ros_color.r = r
+  ros_color.g = g
+  ros_color.b = b
+  ros_color.a = 1
+  return ros_color
+
+
+def _box_face_marker(face_pts, color):
+  from geometry_msgs.msg import Point
+  from visualization_msgs.msg import Marker
+  
+  m = Marker()
+  m.type = Marker.LINE_STRIP  # each point in points is part of the line
+  m.action = Marker.MODIFY    # or add
+  m.color = color
+  m.scale.x = 0.1
+  for i in range(5):
+    p = Point()
+    p.x, p.y, p.z = face_pts[i % 4, :].tolist()
+    m.points.append(p)
+  return m
+
+
+def _box_sides_marker(front_pts, back_pts, color):
+  from geometry_msgs.msg import Point
+  from visualization_msgs.msg import Marker
+
+  m = Marker()
+  m.type = Marker.LINE_LIST # pairs of points create a line
+  m.action = Marker.MODIFY  # or add
+  m.color = color
+  m.scale.x = 0.1
+  for start, end in zip(front_pts.tolist(), back_pts.tolist()):
+    startp = Point()
+    startp.x, startp.y, startp.z = start
+    endp = Point()
+    endp.x, endp.y, endp.z = end
+    m.points += [startp, endp]
+  return m
+
+
+def _box_label_marker(xyz, txt, color):
+  from visualization_msgs.msg import Marker
+
+  m = Marker()
+  m.type = Marker.TEXT_VIEW_FACING
+  m.text = str(txt)
+  m.action = Marker.MODIFY  # or add
+  m.color = color
+  m.scale.x = 0.3
+  m.scale.y = 0.3
+  m.scale.z = 0.3
+  
+  m.pose.position.x = xyz[0]
+  m.pose.position.y = xyz[1]
+  m.pose.position.z = xyz[2]
+  m.pose.orientation.x = 0.0
+  m.pose.orientation.y = 0.0
+  m.pose.orientation.z = 0.0
+  m.pose.orientation.w = 1.0
+
+  return m
+
+
+def cuboids_to_ros_marker_array(cuboids):
+  """Convert a list of psegs.datum.Cuboid objects to ROS 3d Markers"""
+  
+  from visualization_msgs.msg import MarkerArray
+  marray = MarkerArray()
+  
+  # We'll use the Line List and Line Strip Markers instead of the Cube marker
+  # so that we can highlight the front face of the cuboid.
+  for obj_id, cuboid in enumerate(cuboids):
+    from std_msgs.msg import Header
+    header = Header()
+    header.frame_id = 'ego' # fixme? ~~~~~~~~~~~~~~~~~~~~~~~~` to_ros_frame(pc.sensor_name)
+    header.stamp = nanostamp_to_rostime(cuboid.timestamp)
+
+    from oarphpy.plotting import hash_to_rbg
+    base_color = np.array(hash_to_rbg(cuboid.category_name)) / 255.
+    front_color = color_to_ros(base_color + 0.3)
+    back_color = color_to_ros(base_color - 0.3)
+    sides_color = color_to_ros(base_color)
+
+    box_xyz = cuboid.get_box3d()
+    front = box_xyz[:4, :]
+    back = box_xyz[4:, :]
+    top = box_xyz[(0, 1, 4, 5), :]
+    top_center = np.mean(top, axis=0)
+
+    box_markers = [
+      _box_face_marker(front, front_color),
+      _box_sides_marker(front, back, sides_color),
+      _box_face_marker(back, back_color),
+      _box_label_marker(top_center, cuboid.track_id, sides_color),
+    ]
+    for mid, m in enumerate(box_markers):
+      m.id = obj_id * 10 + mid
+      m.ns = cuboid.track_id
+      m.header = header
+    
+    marray.markers += box_markers
+  
+  return marray
+
+
+def cuboids_to_ros_image_marker(ci, cuboids):
+  """Project a list of psegs.datum.Cuboid objects (`cuboids`) into the given
+  psegs.datum.CameraImage `ci` and return a single ROS ImageMarker.
+  (Note that there's no public ImageMarkerArray type, so we must pack
+  everything into one marker)."""
+  
+  from std_msgs.msg import Header
+  header = Header()
+  header.frame_id = to_ros_frame(ci.sensor_name)
+  t = min((c.timestamp for c in cuboids) or (ci.timestamp,))
+  header.stamp = nanostamp_to_rostime(t)
+
+  from visualization_msgs.msg import ImageMarker
+  m = ImageMarker()
+  m.id = 1
+  m.ns = ci.sensor_name
+  m.header = header
+  m.type = ImageMarker.LINE_LIST
+  m.action = ImageMarker.ADD
+  m.scale = 10.0
+  m.filled = 1
+
+  # Sadly, webviz et al does not support one color per line, unlike in 3d
+  # Markers.  NB: ImageMarker colors are in [0, 255]; 3D markers are in [0, 1]
+  m.outline_color = color_to_ros((255, 255, 255), limit=255)
+
+  for obj_id, cuboid in enumerate(cuboids):
+    def project_and_add(start, end):
+      xyd = ci.project_ego_to_image(np.array([start, end]))
+      if xyd.shape[0] != 2:
+        return # At least one point was offscreen / behind camera
+      
+      from geometry_msgs.msg import Point
+      sp = Point()
+      sp.x = xyd[0, 0]
+      sp.y = xyd[0, 1]
+      m.points.append(sp)
+      
+      ep = Point()
+      ep.x = xyd[1, 0]
+      ep.y = xyd[1, 1]
+      m.points.append(ep)
+    
+    box_xyz = cuboid.get_box3d()
+    front = box_xyz[:4, :]
+    for i in range(5):
+      project_and_add(front[i % 4, :], front[(i+1) % 4, :])
+    
+    back = box_xyz[4:, :]
+    for i in range(5):
+      project_and_add(back[i % 4, :], back[(i+1) % 4, :])
+    
+    for start, end in zip(front.tolist(), back.tolist()):
+      project_and_add(start, end)
+  
+  return m
+
+
+def pc_to_ros_image_marker(ci, point_cloud, every_nth_pt=10):
+  """Project a psegs.datum.PointCloud instance `point_cloud` into the given
+  psegs.datum.CameraImage `ci` and return a ROS ImageMarker.  Since using
+  all points is expensive, we subsamble `every_nth_pt` (only if `every_nth_pt`
+  is positive)."""
+
+  from std_msgs.msg import Header
+  header = Header()
+  header.frame_id = to_ros_frame(ci.sensor_name)
+  header.stamp = nanostamp_to_rostime(point_cloud.timestamp)
+
+  from visualization_msgs.msg import ImageMarker
+  m = ImageMarker()
+  m.id = hash(point_cloud.sensor_name) % 2147483647
+  m.ns = point_cloud.sensor_name
+  m.header = header
+  m.type = ImageMarker.POINTS
+  m.action = ImageMarker.ADD
+  m.scale = 1.0
+
+  xyd = ci.project_ego_to_image(point_cloud.cloud, omit_offscreen=True)
+  if every_nth_pt > 0:
+    xyd = xyd[::every_nth_pt]
+
+  from psegs.util.plotting import rgb_for_distance
+  colors = rgb_for_distance(xyd[:,2])
+
+  from geometry_msgs.msg import Point
+  for xy, color in zip(xyd[:,:2], colors):
+    p = Point()
+    p.x = xy[0]
+    p.y = xy[1]
+    m.points.append(p)
+    m.outline_colors.append(color_to_ros(color, limit=255))
+      # NB: ImageMarker colors are in [0, 255]; 3D markers are in [0, 1]
+
+  return m
+
+
+### PSegs -> ROS: RDD[StampedDatum] conversion ::::::::::::::::::::::::::::::::
+
+# A container compatible with both ROSBag as well as ROS Publishers
+ROSMsgEntry = collections.namedtuple(
+                'ROSMsgEntry', ('topic', 'timestamp', 'msg'))
+
+class StampedDatumToROSMsgConverter(object):
+
+  def __init__(
+            self,
+            gen_3d_image_markers=False,
+            gen_cloud_image_markers=False):
+    self._gen_3d_image_markers = gen_3d_image_markers
+    self._gen_cloud_image_markers = gen_cloud_image_markers
+    self._topic_to_last_camera_image = {}
+
+  @classmethod
+  def create_from_prog_args(cls, args):
+    return cls(
+      gen_3d_image_markers=not args.no_image_markers,
+      gen_cloud_image_markers=args.image_clouds)
+
+  def _maybe_cache_sd(self, sd):
+    if not (sd.camera_image and 
+        (self._gen_3d_image_markers or self._gen_cloud_image_markers)):
+      return  
+    self._topic_to_last_camera_image[sd.uri.topic] = sd.camera_image
+
+  def _maybe_gen_image_markers(self, sd):
+    for ci_topic, ci in self._topic_to_last_camera_image.items():
+      namespace = to_ros_topic(ci_topic)
+      marker_topic = namespace + to_ros_topic(sd.uri.topic)
+      img_marker = cuboids_to_ros_image_marker(ci, sd.cuboids)
+      yield ROSMsgEntry(
+        timestamp=nanostamp_to_rostime(sd.uri.timestamp),
+        topic=marker_topic,
+        msg=img_marker)
+
+  def _maybe_gen_image_clouds(self, sd):
+    for ci_topic, ci in self._topic_to_last_camera_image.items():
+      namespace = to_ros_topic(ci_topic)
+      marker_topic = namespace + to_ros_topic(sd.uri.topic)
+      marker = pc_to_ros_image_marker(ci, sd.point_cloud)
+      yield ROSMsgEntry(
+          timestamp=nanostamp_to_rostime(sd.uri.timestamp),
+          topic=marker_topic,
+          msg=marker)
+
+  def iter_rosmsgs_from_datum(self, stamped_datum):
+    """Given a PSegs `StampedDatum`, generate one or more `ROSMsgEntry`
+    instances"""
+    
+    sd = stamped_datum
+    msg_t = nanostamp_to_rostime(sd.uri.timestamp)
+
+    self._maybe_cache_sd(sd)
+
+    transforms = []
+    if sd.camera_image:
+      namespace = to_ros_topic(sd.uri.topic)
+      yield ROSMsgEntry(
+        timestamp=msg_t,
+        topic=namespace + '/image',
+        msg=ci_to_ros_image(sd.camera_image))
+      yield ROSMsgEntry(
+        timestamp=msg_t,
+        topic=namespace + '/camera_info',
+        msg=ci_to_ros_camera_info(sd.camera_image))
+
+      transforms += [sd.camera_image.ego_pose, sd.camera_image.ego_to_sensor]
+
+    elif sd.point_cloud:
+      yield ROSMsgEntry(
+        timestamp=msg_t,
+        topic=to_ros_topic(sd.uri.topic),
+        msg=pc_to_ros_pcl(sd.point_cloud))
+      
+      transforms += [sd.point_cloud.ego_pose, sd.point_cloud.ego_to_sensor]
+
+      for msg in self._maybe_gen_image_clouds(sd):
+        yield msg
+
+    elif sd.cuboids:
+      yield ROSMsgEntry(
+        timestamp=msg_t,
+        topic=to_ros_topic(sd.uri.topic),
+        msg=cuboids_to_ros_marker_array(sd.cuboids))
+      
+      transforms += [c.ego_pose for c in sd.cuboids]
+
+      for msg in self._maybe_gen_image_markers(sd):
+        yield msg
+
+    elif sd.transform:
+      transforms += [sd.transform]
+    
+    for transform in transforms:
+      yield ROSMsgEntry(
+        timestamp=msg_t,
+        topic='/tf',
+        msg=transform_to_ros(transform))
+
+
+### Self-Test :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+
+def _create_fake_black_png(hw=(100, 200)):
+  h, w = hw
+  img = np.zeros((h, w, 3), dtype=np.uint8)
+
+  from PIL import Image
+  p_img = Image.fromarray(img)
+  
+  from io import BytesIO
+  with BytesIO() as output:
+    p_img.save(output, 'PNG')
+    img_bytes = bytearray(output.getvalue())
+  return img_bytes
+
+
+def test_psegs_ros(args):
+  # Test PSegs -> ROS conversions using PSegs prototypes ----------------------
+  import_psegs_or_die(args.psegs_root)
+
+  import copy
+  from psegs.datum import stamped_datum as sd
+
+  # CameraInfo ----------------------------------------------------------------
+  info = ci_to_ros_camera_info(sd.CAMERAIMAGE_PROTO)
+  assert str(info)
+  assert info.K == [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+  assert info.P == [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+
+  # ROS TF --------------------------------------------------------------------
+  xform = copy.deepcopy(sd.TRANSFORM_PROTO)
+  xform.src_frame = 'src'
+  xform.dest_frame = 'dest'
+  ros_tf = transform_to_ros(xform)
+  assert str(ros_tf)
+  assert len(ros_tf.transforms) == 1
+  assert ros_tf.transforms[0].header.frame_id == 'src'
+  assert ros_tf.transforms[0].child_frame_id == 'dest'
+
+  # ROS Camera Image ----------------------------------------------------------
+  ci = copy.deepcopy(sd.CAMERAIMAGE_PROTO)
+  ci.image_png = _create_fake_black_png(hw=(100, 200))
+  ci.height = 100
+  ci.width = 200
+  image_msg = ci_to_ros_image(ci)
+  assert str(image_msg)
+  assert image_msg.height == 100
+  assert image_msg.width == 200
+  assert len(image_msg.data) == (100 * 200 * 3)
+
+  # PCL Point Cloud -----------------------------------------------------------
+  pc = copy.deepcopy(sd.POINTCLOUD_PROTO)
+  pc.cloud = np.random.rand(10, 3)
+  pcl_msg = pc_to_ros_pcl(pc)
+  assert str(pcl_msg)
+  assert pcl_msg.fields[0].name == 'x'
+  assert pcl_msg.fields[1].name == 'y'
+  assert pcl_msg.fields[2].name == 'z'
+  assert pcl_msg.fields[3].name == 'rgb'
+
+  # ROS 3D Markers ------------------------------------------------------------
+  cuboids = [copy.deepcopy(sd.CUBOID_PROTO)] * 4
+  for c in cuboids:
+    c.length_meters = 1
+    c.height_meters = 1
+    c.width_meters = 1
+    c.obj_from_ego.translation[0] = 1
+    c.obj_from_ego.src_frame = 'ego'
+    c.obj_from_ego.dest_frame = 'obj'
+  cube_markers = cuboids_to_ros_marker_array(cuboids)
+  assert str(cube_markers)
+  assert len(cube_markers.markers) == 16
+
+  # ROS Cuboid 2D Image Markers -----------------------------------------------
+  image_marker = cuboids_to_ros_image_marker(ci, cuboids)
+  assert str(image_marker)
+  assert len(image_marker.points) == 12 * len(cuboids)
+
+  # ROS PointCloud 2D Image Markers -------------------------------------------
+  pc_image_marker = pc_to_ros_image_marker(ci, pc, every_nth_pt=2)
+  assert str(pc_image_marker)
+  assert len(pc_image_marker.points) == pc.cloud.shape[0] / 2
+
+  log.info("Self-test success!")
+
+
+###############################################################################
+### CLI
+
+def create_arg_parser():
+  import argparse
+  
+  parser = argparse.ArgumentParser(
+              description=USAGE,
+              formatter_class=argparse.RawDescriptionHelpFormatter)
+
+  # Conf
+  parser.add_argument(
+    '--segments', default='',
+    help='Use these segment_ids (comma-separated list)')
+  parser.add_argument(
+    '--psegs-root', default='/opt/psegs',
+    help='Use this psegs workspace [default %(default)s]')
+  parser.add_argument(
+    '--bag-compression', default='lz4',
+    help='Use this ROS Bag compression scheme [default %(default)s]')
+  parser.add_argument(
+    '--no-image-markers', default=False, action='store_true',
+    help='Do not automatically generate image markers from 3D markers')
+  parser.add_argument(
+    '--image-clouds', default=False, action='store_true',
+    help='Automatically generate image markers from PointClouds (expensive)')
+  parser.add_argument(
+    '--broadcast-throttle', default=0.05,
+    help='In ROS Node mode, throttle broadcasting by sleeping this many '
+         'seconds between published messages (-1 to disable) '
+         '[default %(default)s]')
+
+  # Actions
+  parser.add_argument(
+    '--to-bag', default='',
+    help='Convert to ROS Bag(s); write to this file or directory')
+  parser.add_argument(
+    '--broadcast', default=False, action='store_true',
+    help='Start a ROS node and publish the given segment')
+  parser.add_argument(
+    '--self-test', default=False, action='store_true',
+    help='Test PSegs-ROS integration')
+
+  return parser
+
+
+def main(args=None):
+  if not args:
+    parser = create_arg_parser()
+    args = parser.parse_args()
+  
+  if args.to_bag:
+    export_bags(args)
+  elif args.broadcast:
+    run_rosnode(args)
+  elif args.self_test:
+    test_psegs_ros(args)
+
+
+def get_segment_uris(args):
+  segs = args.segments.split(',')
+  uris = []
+  for s in segs:
+    from psegs import datum
+    if s.startswith(datum.URI.PREFIX):
+      uris.append(datum.URI.from_str(s))
+    else:
+      uris.append(datum.URI(segment_id=s))
+  return uris
+
+
+### ROS Bag Export ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+
+def export_bags(args):
+  import_psegs_or_die(args.psegs_root)
+  from psegs import datum
+  from psegs.spark import Spark
+  from psegs.table.sd_db import StampedDatumDB
+
+  import rosbag
+
+  seg_uris = get_segment_uris(args)
+  log.info("Going to export bags for %s segments ..." % len(seg_uris))
+
+  if len(seg_uris) > 1:
+    from oarphpy import util as oputil
+    oputil.mkdir(args.to_bag)
+    log.info("... saving bags to %s ..." % args.to_bag)
+  
+  with Spark.getOrCreate() as spark:
+    for seg_uri in seg_uris:
+      if len(seg_uris) > 1:
+        bag_name = str(seg_uri)
+        bag_name = bag_name.replace(datum.URI.PREFIX, '') + '.bag'
+        bag_dest = os.path.join(args.to_bag, bag_name)
+      else:
+        bag_dest = args.to_bag
+      log.info("... writing a bag to %s ..." % bag_dest)
+      
+      sd_rdd = StampedDatumDB.get_segment_datum_rdd(
+                      spark, seg_uri, time_ordered=True)
+      log.info("... addressed datums for %s ..." % bag_dest)
+
+      comp = args.bag_compression
+      n_written = 0
+      with rosbag.Bag(bag_dest, mode='w', compression=comp) as bag:
+        conv = StampedDatumToROSMsgConverter.create_from_prog_args(args)
+        for sd in sd_rdd.toLocalIterator():
+          for rosmsg in conv.iter_rosmsgs_from_datum(sd):
+            bag.write(rosmsg.topic, rosmsg.msg, t=rosmsg.timestamp)
+            n_written += 1
+            if (n_written % 1000) == 0:
+              log.info("... wrote %s to %s ...\n\n%s\n\n" % (
+                n_written, bag_dest, str(bag)))
+      log.info("... done writing %s ..." % bag_dest)
+  log.info("... wrote all bags to %s ." % args.to_bag)
+
+
+### Broadcast Using ROS Node ::::::::::::::::::::::::::::::::::::::::::::::::::
+
+class DynamicPubNode(object):
+  def __init__(self):
+    import rospy
+    self._topic_to_pub = {}
+    rospy.init_node('psegs_ros_util_broadcast')
+
+  def publish(self, topic, msg):
+    if topic not in self._topic_to_pub:
+      import rospy
+      pub = rospy.Publisher(topic, type(msg), queue_size=0)
+      self._topic_to_pub[topic] = pub
+    pub = self._topic_to_pub[topic]
+    pub.publish(msg)
+
+
+def run_rosnode(args):
+  import_psegs_or_die(args.psegs_root)
+  from psegs import datum
+  from psegs.spark import Spark
+  from psegs.table.sd_db import StampedDatumDB
+
+  seg_uris = get_segment_uris(args)
+  log.info("Going to broadcast data for %s segments ..." % len(seg_uris))
+
+  node = DynamicPubNode()
+  
+  with Spark.getOrCreate() as spark:
+    for seg_uri in seg_uris:
+      sd_rdd = StampedDatumDB.get_segment_datum_rdd(
+                  spark, seg_uri, time_ordered=True)
+      log.info("... addressed datums for %s ..." % seg_uri)
+
+      n = 0
+      conv = StampedDatumToROSMsgConverter.create_from_prog_args(args)
+      for sd in sd_rdd.toLocalIterator():
+        for rosmsg in conv.iter_rosmsgs_from_datum(sd):
+          if args.broadcast_throttle > 0:
+            import time
+            time.sleep(args.broadcast_throttle)
+          node.publish(rosmsg.topic, rosmsg.msg)
+          n += 1
+          if (n % 100) == 0:
+            log.info("... broadcasted %s for %s ..." % (n, seg_uri))
+      log.info("... done with %s ..." % seg_uri)
+  log.info("... done broadcasting.")
+
+
+if __name__ == '__main__':
+  main()
